@@ -1,0 +1,42 @@
+# ──────────────────────────────────────────────────────────────────
+# Viper — Python dependencies
+#
+# IMPORTANT — PyTorch for RTX 5070 (Blackwell / sm_120):
+#   The default "pip install torch" wheel does NOT support sm_120.
+#   Install the CUDA 12.6 build FIRST, before pip-installing this file:
+#
+#   pip install torch torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/cu126
+#
+#   Then install the rest:
+#   pip install -r requirements.txt
+# ──────────────────────────────────────────────────────────────────
+
+# PyTorch — version floor only; actual install handled by CUDA wheel above.
+torch>=2.6.0
+torchvision>=0.21.0
+
+# ── LLM runtime ───────────────────────────────────────────────────
+# Ollama Python SDK.  Ollama itself is a separate binary:
+#   https://ollama.com/download
+ollama>=0.3.3
+
+# ── Embeddings ────────────────────────────────────────────────────
+sentence-transformers>=3.1.0
+
+# ── Vector store ──────────────────────────────────────────────────
+chromadb>=0.5.23
+
+# ── Document loading & text splitting ─────────────────────────────
+langchain>=0.3.7
+langchain-community>=0.3.7
+langchain-text-splitters>=0.3.2
+pypdf>=4.3.1            # PDF loading
+
+# ── API ───────────────────────────────────────────────────────────
+fastapi>=0.115.5
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+
+# ── Config ────────────────────────────────────────────────────────
+pyyaml>=6.0.2

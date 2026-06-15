@@ -1,0 +1,38 @@
+# ──────────────────────────────────────────────────────────
+# Viper — backend capabilities configuration
+# Edit model names and tunables here; no Python changes needed.
+# All paths are relative to the project root.
+# ──────────────────────────────────────────────────────────
+
+llm:
+  # Ollama model tag.  Swap to "llama3.2:3b" for a smaller footprint.
+  model: "mistral:latest"        # 7B Q4_K_M  ≈ 4.5 GB VRAM
+  temperature: 0.7
+  max_tokens: 512
+  base_url: "http://localhost:11434"
+
+vision:
+  # Multimodal model served by Ollama.  LLaVA 7B Q4 ≈ 4.5 GB VRAM.
+  # Ollama evicts it when idle so it does not permanently share VRAM with the LLM.
+  model: "llava:7b"
+  base_url: "http://localhost:11434"
+
+embeddings:
+  # sentence-transformers model.  Runs on CPU — keeps VRAM free for the LLM.
+  model: "sentence-transformers/all-MiniLM-L6-v2"   # ~90 MB
+  device: "cpu"
+
+rag:
+  chunk_size: 512       # target characters per chunk; smaller = more precise retrieval
+  chunk_overlap: 64     # shared characters between adjacent chunks
+  top_k: 4             # chunks returned to the caller per query
+  chroma_persist_dir: "./data/chroma_db"
+  collection_name: "viper_docs"
+
+api:
+  # true  → the FastAPI adapter is active; run via:  python run_api.py
+  # false → capabilities are used in-process only (import from `capabilities`)
+  enabled: true
+  host: "0.0.0.0"
+  port: 8000
+  reload: true          # set false in production
