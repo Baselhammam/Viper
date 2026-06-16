@@ -242,6 +242,93 @@ viper.ingest(["path/to/your/manual.pdf"])
 
 ---
 
+## Reproduce flow
+
+Follow these steps on a clean checkout to go from zero to a running system.
+
+### 1. Pull pinned base models and build Viper variants
+
+```bash
+# From Viper/ (project root)
+python scripts/setup_models.py
+```
+
+This script is **idempotent** — re-running it is a no-op if nothing has
+changed. It will:
+
+1. Verify Ollama is reachable (`ollama serve` must be running)
+2. Pull `mistral:7b-instruct-v0.3-q4_K_M` and `llava:7b-v1.6-mistral-q4_K_M`
+   if not already cached locally
+3. Build `viper-llm`, `viper-llm-tools`, and `viper-vision` from the
+   committed Modelfiles in `modelfiles/`
+
+To force a rebuild of all variants (e.g. after editing a Modelfile):
+
+```bash
+python scripts/setup_models.py --force
+```
+
+### 2. Verify the environment
+
+```bash
+python check_env.py           # Python, CUDA, Ollama, models, LLM round-trip
+python check_env.py --vision  # also runs vision round-trip (slow — model swap)
+```
+
+Expected: all `[PASS]` lines, exit code 0.
+
+### 3. Run the demo
+
+```bash
+python demo.py
+```
+
+---
+
+## Optional `config.yaml` fields
+
+These fields are new and **optional** — omitting them preserves the existing
+behaviour exactly. Existing `config.yaml` files with `temperature` and
+`max_tokens` at the top level continue to work unchanged.
+
+| Key | Type | What it controls |
+|-----|------|-----------------|
+| `llm.system_prompt` | string | Default system prompt; prepended unless the caller already set one |
+| `llm.format` | `"json"` | Constrain Ollama output to valid JSON syntax (Ollama ≥ 0.1.9) |
+| `llm.options.num_ctx` | int | Context window (default: Modelfile value; >8192 increases VRAM) |
+| `llm.options.seed` | int | Fixed RNG seed (pair with `temperature: 0` for determinism) |
+| `llm.options.repeat_penalty` | float | Penalise repeated tokens |
+| `llm.options.num_predict` | int | Max tokens per response |
+| `vision.system_prompt` | string | Default system prompt for vision calls |
+| `vision.options.num_ctx` | int | Context window for vision model |
+| `vision.options.temperature` | float | Vision model temperature |
+
+**Precedence rule** (highest wins):
+`per-call override > config.yaml options > Modelfile PARAMETER default`
+
+Only keys that are explicitly set are forwarded to Ollama. Unset keys fall
+through to whatever the Modelfile baked in — so an empty `options:` block
+gives full control back to the Modelfile.
+
+Example snippet using the new fields:
+
+```yaml
+llm:
+  model: "viper-llm"           # custom variant built by setup_models.py
+  base_url: "http://localhost:11434"
+  # temperature and max_tokens still work here for backward compat
+  options:
+    num_ctx: 4096
+    seed: 42                   # pair with temperature: 0 for determinism
+
+vision:
+  model: "viper-vision"
+  base_url: "http://localhost:11434"
+  system_prompt: "Describe this image for a visually impaired user."
+```
+
+---
+
 ## What does NOT fit in 12 GB
 
 - **70B models** (even Q4 requires ~35–40 GB) — use a 7B or 13B variant instead.
