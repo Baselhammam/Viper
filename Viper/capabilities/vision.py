@@ -17,6 +17,7 @@ from pathlib import Path
 import ollama
 
 from app.config import cfg
+from app.model_options import maybe_inject_system, resolve_vision_options
 from capabilities.interfaces import VisionCapability
 
 
@@ -43,16 +44,19 @@ class OllamaVision(VisionCapability):
                     for a screenshot, or "What does this chart show?" for a graph.
         """
         self._validate(image_path)
+        user_message = {
+            "role": "user",
+            "content": prompt,
+            # Ollama expects a list of base64-encoded image strings.
+            "images": [self._to_b64(image_path)],
+        }
+        messages = maybe_inject_system([user_message], cfg.vision.system_prompt)
+        options = resolve_vision_options(cfg.vision)
+
         response = self._client.chat(
             model=self._model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                    # Ollama expects a list of base64-encoded image strings.
-                    "images": [self._to_b64(image_path)],
-                }
-            ],
+            messages=messages,
+            options=options if options else None,
         )
         return response.message.content or ""
 
