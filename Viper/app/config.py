@@ -4,22 +4,60 @@ Reads config.yaml once and exposes a singleton `cfg` imported everywhere.
 To change any setting, edit config.yaml — no Python changes needed.
 """
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import yaml
 from pydantic import BaseModel
 
 
+# ── Nested options models ──────────────────────────────────────────────────────
+# All fields Optional — only keys explicitly set in config.yaml are forwarded
+# to Ollama. Unset keys fall through to whatever the Modelfile baked in.
+# Resolution logic lives in app/model_options.py (single source of truth).
+
+class LLMOptions(BaseModel):
+    temperature: Optional[float] = None
+    num_ctx: Optional[int] = None
+    seed: Optional[int] = None
+    stop: Optional[List[str]] = None
+    repeat_penalty: Optional[float] = None
+    num_predict: Optional[int] = None
+
+
+class VisionOptions(BaseModel):
+    temperature: Optional[float] = None
+    num_ctx: Optional[int] = None
+    seed: Optional[int] = None
+    stop: Optional[List[str]] = None
+    repeat_penalty: Optional[float] = None
+    num_predict: Optional[int] = None
+
+
+# ── Top-level config models ────────────────────────────────────────────────────
+
 class LLMConfig(BaseModel):
     model: str
-    temperature: float
-    max_tokens: int
     base_url: str
+    # Flat convenience keys kept Optional for backward compat with existing
+    # config.yaml files that set them at the top level.  If both flat keys
+    # and an `options` block are present, the options block wins (see
+    # app/model_options.llm_options_from_config for the merge order).
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    # New optional fields — omitting them preserves existing behaviour.
+    system_prompt: Optional[str] = None
+    options: Optional[LLMOptions] = None
+    # NOTE: `format` constrains JSON *syntax*, not content correctness.
+    # Requires Ollama >= 0.1.9.  Targeting the legacy "json" string value
+    # for maximum compatibility; JSON-schema objects require Ollama >= 0.5.x.
+    format: Optional[str] = None
 
 
 class VisionConfig(BaseModel):
     model: str
     base_url: str
+    system_prompt: Optional[str] = None
+    options: Optional[VisionOptions] = None
 
 
 class EmbeddingsConfig(BaseModel):
