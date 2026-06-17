@@ -1,0 +1,35 @@
+# Viper vision variant.
+#
+# Base: LLaVA 1.6 with Mistral backbone, 4-bit K-means quantized.
+# Pinned to a specific version tag (not :latest) so builds are reproducible.
+# To use a SHA256 digest for true immutability, replace the FROM line with:
+#   FROM llava:7b-v1.6-mistral-q4_K_M@sha256:<digest>
+#
+# VRAM budget (RTX 5070, 12 GB):
+#   Model weights  ~4.5 GB
+#   KV cache 2048  ~0.3–0.5 GB
+#   Total          ~4.8–5.0 GB  ✓
+#
+# Ollama evicts this model when idle, so it does not permanently share
+# VRAM with the LLM variant.  Loading it forces an LLM eviction (~3–10 s
+# on an RTX 5070) — mark the vision round-trip as opt-in in check_env.py.
+#
+# num_ctx is set lower than the LLM variant (2048 vs 4096) because vision
+# tasks typically produce shorter text responses and the image tokens
+# consume most of the context budget.
+#
+# Build:  python scripts/setup_models.py
+# Use:    set vision.model: "viper-vision" in config.yaml
+
+FROM llava:7b-v1.6-mistral-q4_K_M
+
+SYSTEM """
+You are Viper's vision module. Describe images accurately and in detail.
+Report what you directly observe — do not speculate about content that is
+not clearly visible. Extract text verbatim when asked.
+"""
+
+PARAMETER temperature    0.3
+PARAMETER num_ctx        2048
+PARAMETER repeat_penalty 1.1
+PARAMETER num_predict    512

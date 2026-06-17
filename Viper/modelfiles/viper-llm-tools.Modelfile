@@ -1,0 +1,33 @@
+# Viper tool-calling LLM variant — tuned for determinism.
+#
+# Base: same Mistral 7B Instruct v0.3 Q4_K_M as viper-llm.
+# Pinned to a specific version tag (not :latest) so builds are reproducible.
+#
+# DETERMINISM NOTE:
+#   temperature: 0 alone is NOT sufficient for reproducible outputs with
+#   Ollama's llama.cpp sampler.  A fixed seed is also required.  Both
+#   must be set together:
+#       temperature: 0   (greedy decoding — no randomness in token selection)
+#       seed: 42         (fixes the RNG for any stochastic ops that remain)
+#   Omitting either one may still produce non-deterministic results on some
+#   builds of llama.cpp.
+#
+# VRAM budget: same as viper-llm (~5–5.5 GB at 4096 ctx).
+#
+# Build:  python scripts/setup_models.py
+# Use:    set llm.model: "viper-llm-tools" in config.yaml when tool-calling
+#         accuracy and reproducibility matter more than response variety.
+
+FROM mistral:7b-instruct-v0.3-q4_K_M
+
+SYSTEM """
+You are Viper, a precise AI assistant with access to tools.
+When a tool can answer the question more accurately than your training data,
+call it. Return only the final answer — no preamble, no narration of steps.
+"""
+
+PARAMETER temperature    0
+PARAMETER seed           42
+PARAMETER num_ctx        4096
+PARAMETER repeat_penalty 1.0
+PARAMETER num_predict    512
