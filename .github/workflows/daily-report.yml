@@ -1,0 +1,41 @@
+name: Daily progress report
+
+on:
+  schedule:
+    # 04:00 UTC = 07:00 Asia/Bahrain (UTC+3)
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          # MANDATORY: report.py reads ~26h of commit history. A shallow
+          # checkout would hide commits and break the ground-truth signal.
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # pytest is installed here (not in requirements.txt) so the test signal
+        # can actually be collected in CI; an empty suite counts as pass.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r automation/requirements.txt pytest
+
+      - name: Run daily report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TASKS_PAGE_ID: ${{ secrets.NOTION_TASKS_PAGE_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python automation/report.py
