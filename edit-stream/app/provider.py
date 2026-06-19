@@ -4,21 +4,24 @@ The provider boundary — the stable seam.
 Callers depend only on `EditProvider`. All vendor-specific code (Anthropic,
 or any future on-device/different-vendor implementation) must live behind
 this interface and never leak upward.
+
+Note: this returns the full block list in one shot, not a stream. Atomic
+all-or-nothing validation (app/applier.py) requires every block to be known
+before any of them can be safely applied, so there is nothing useful to
+stream incrementally to a caller — see anthropic_provider.py.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol
+from typing import Protocol
 
-from app.models import EditOp, Target
+from app.models import SearchReplaceBlock, Target
 
 
 class EditProvider(Protocol):
-    def stream_edits(self, target: Target, prompt: str) -> AsyncIterator[EditOp]:
+    async def propose_patch(self, target: Target, prompt: str) -> list[SearchReplaceBlock]:
         """
-        Stream a sequence of EditOps for `prompt` applied to `target`.
-
-        Implementations MUST only yield an EditOp once it is fully formed
-        (never a partially-parsed or speculative edit) — see the Anthropic
-        implementation for why this matters under cancellation.
+        Return the model's proposed SEARCH/REPLACE blocks for `prompt`
+        applied to `target`. Does not validate or apply them — that's
+        app/applier.py's job.
         """
         ...
