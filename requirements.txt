@@ -1,0 +1,2 @@
+# Root Python deps. Currently only scripts/verify_access.py needs the Anthropic SDK.
+anthropic>=0.40
