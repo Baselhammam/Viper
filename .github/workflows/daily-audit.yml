@@ -1,0 +1,32 @@
+name: daily-code-audit
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: code-audit
+  cancel-in-progress: false
+permissions:
+  contents: read
+  issues: write
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Run audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SPEC: Viper/README.md
+          MAX_BUDGET_USD: "2"
+        run: bash .claude/skills/code-auditor/scripts/run-audit.sh
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-audit-${{ github.run_id }}
+          path: audits/
+          if-no-files-found: ignore
