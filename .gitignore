@@ -41,3 +41,8 @@ ENV/
 Thumbs.db
 *.swp
 *.swo
+
+# ── Node / frontend (Vite + React) ─────────────────────────────────────────────
+node_modules/
+*.local
+# (.env and dist/ are already ignored above)
