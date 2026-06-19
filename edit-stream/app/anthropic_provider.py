@@ -1,224 +1,181 @@
 """
 Anthropic-backed implementation of EditProvider.
 
-This is the ONLY file that knows about the Anthropic SDK, the
-"propose_edits" tool contract, or prompt-caching mechanics. Callers only
-ever see `EditProvider`.
+This is the ONLY file that knows about the Anthropic SDK or the
+`propose_patch` tool contract. Callers only ever see `EditProvider`.
 
 Verified against docs.claude.com (redirects to platform.claude.com) on
-2026-06-18, against `anthropic` Python SDK 0.x (Messages API, `messages.stream`):
-  - cache_control: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
-  - tool use / tool_choice: https://platform.claude.com/docs/en/build-with-claude/tool-use/overview
-  - streaming events (content_block_delta / input_json_delta): https://platform.claude.com/docs/en/api/messages-streaming
+2026-06-19, against the `anthropic` Python SDK, Messages API:
+  - tool definitions / `input_schema`: /docs/en/agents-and-tools/tool-use/define-tools
+  - forcing tool use (`tool_choice={"type": "tool", "name": ...}`): same page
+  - current model ids (Sonnet/Haiku-class): /docs/en/about-claude/models/overview
+
+Non-streaming by design: atomic all-or-nothing validation (app/applier.py)
+needs every block before any of them can be safely applied, so there is
+nothing to usefully stream — a single `messages.create()` call returns the
+already-parsed tool `.input`, which is simpler and removes an entire class
+of partial-JSON-reconstruction bugs that streaming would otherwise require.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
-from typing import Any, AsyncIterator
 
-import pydantic_core
 from anthropic import AsyncAnthropic
 
-from app.models import EditOp, Target
+from app.models import SearchReplaceBlock, Target
+from app.settings import settings
 
 logger = logging.getLogger("edit_stream.anthropic_provider")
 
-# Suggested default: a fast/cheap model is enough for range-edit generation.
-# Sonnet-class also has a lower prompt-cache minimum (1024 tokens) than
-# Haiku-class (4096 tokens), making the cache demo easier to trigger with a
-# realistically-sized target. Override via MODEL env var.
-DEFAULT_MODEL = "claude-sonnet-4-6"
+TOOL_NAME = "propose_patch"
 
-TOOL_NAME = "propose_edits"
-
-_EDIT_OP_SCHEMA = {
+_BLOCK_SCHEMA = {
     "type": "object",
     "properties": {
-        "start": {"type": "integer", "description": "Start offset (inclusive) into target.content."},
-        "end": {"type": "integer", "description": "End offset (exclusive) into target.content."},
-        "replacement": {"type": "string", "description": "Text to replace the [start, end) range with."},
+        "search": {
+            "type": "string",
+            "description": "Exact, verbatim substring of the CURRENT target text to locate.",
+        },
+        "replace": {
+            "type": "string",
+            "description": "Text to put in place of `search`.",
+        },
     },
-    "required": ["start", "end", "replacement"],
+    "required": ["search", "replace"],
 }
 
 _TOOL_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "edits": {
+        "blocks": {
             "type": "array",
-            "items": _EDIT_OP_SCHEMA,
-            "description": "Ordered list of range-based text edits to apply to target.content.",
+            "items": _BLOCK_SCHEMA,
+            "description": (
+                "Ordered list of SEARCH/REPLACE blocks. Apply in order; "
+                "each `search` must be an exact, unique substring of the "
+                "target at the point it is applied."
+            ),
         },
     },
-    "required": ["edits"],
+    "required": ["blocks"],
 }
 
-_SYSTEM_PROMPT = (
-    "You are a code/text editing engine. You receive a text buffer (the target) "
-    "and an instruction. You MUST respond by calling the "
-    f"`{TOOL_NAME}` tool exactly once with a list of range-based edits "
-    "(start, end, replacement) that implement the instruction. "
-    "Never respond with prose, never repeat or regenerate the whole document — "
-    "only emit the minimal set of edits needed. "
-    "start/end are character offsets into the ORIGINAL target.content "
-    "(end is exclusive, like a Python slice)."
-)
+
+def _build_system_prompt() -> str:
+    # The marker strings are config (app/settings.py), not hardcoded here,
+    # so the visual block grammar shown to the model has exactly one source
+    # of truth even though the actual wire format is the structured tool
+    # call below, not raw delimited text.
+    return (
+        "You are a precise text/code editing engine. You receive a target "
+        "text buffer and an instruction. Respond by calling the "
+        f"`{TOOL_NAME}` tool exactly once with one or more SEARCH/REPLACE "
+        "blocks that implement the instruction, conceptually shaped like:\n\n"
+        f"{settings.search_marker}\n"
+        "<exact existing text from the target>\n"
+        f"{settings.divider_marker}\n"
+        "<replacement text>\n"
+        f"{settings.replace_marker}\n\n"
+        "Rules:\n"
+        "- `search` MUST be an exact, verbatim substring of the target — "
+        "copy real text, never compute character offsets or line numbers.\n"
+        "- `search` MUST be unique in the target at the point this block "
+        "applies; if the text you want to change appears more than once, "
+        "include enough surrounding context in `search` to make it unique.\n"
+        "- Never regenerate or repeat the whole document — emit only the "
+        "minimal blocks needed.\n"
+        "- Never respond with prose."
+    )
 
 
 class AnthropicEditProvider:
     """EditProvider backed by the Anthropic Messages API."""
 
-    def __init__(self, client: AsyncAnthropic | None = None, model: str | None = None) -> None:
-        # API key is read from ANTHROPIC_API_KEY by the SDK itself if not
-        # passed explicitly — never read/forward it ourselves, so it can
-        # never accidentally end up in a log line or response.
-        self._client = client or AsyncAnthropic()
-        self._model = model or os.environ.get("MODEL", DEFAULT_MODEL)
+    def __init__(self, client: AsyncAnthropic | None = None) -> None:
+        # The API key never passes through our own code as a plain str —
+        # `.get_secret_value()` is called here and only here, right at the
+        # SDK boundary, and the resulting client object is never logged.
+        self._client = client or AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value(),
+            timeout=settings.request_timeout_s,
+        )
 
-    async def stream_edits(self, target: Target, prompt: str) -> AsyncIterator[EditOp]:
-        # Two separate cache breakpoints:
-        #   1. The system prompt (static across all calls, all targets).
-        #   2. The target content (static across repeated previews on the
-        #      SAME target; only `prompt` varies call-to-call).
-        # Putting `prompt` in its own, uncached block after the target means
-        # changing the prompt never invalidates the cached target prefix.
-        system = [
-            {
-                "type": "text",
-                "text": _SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Target ({target.language or 'plaintext'}):\n{target.content}",
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {
-                        "type": "text",
-                        "text": f"Instruction: {prompt}",
-                    },
-                ],
-            }
-        ]
-        tools = [
-            {
-                "name": TOOL_NAME,
-                "description": "Propose a list of range-based text edits to apply to the target.",
-                "input_schema": _TOOL_INPUT_SCHEMA,
-            }
-        ]
-
-        # Buffer of raw partial_json text, keyed by content_block index, for
-        # the (single) propose_edits tool_use block we expect.
-        buffers: dict[int, str] = {}
-        emitted_counts: dict[int, int] = {}
-        tool_block_indexes: set[int] = set()
-
-        async with self._client.messages.stream(
-            model=self._model,
-            max_tokens=4096,
-            system=system,
-            messages=messages,
-            tools=tools,
-            # Force the model to always call propose_edits — never prose.
+    async def propose_patch(self, target: Target, prompt: str) -> list[SearchReplaceBlock]:
+        # Two cache breakpoints, preserved from the previous design: the
+        # system prompt (static across all calls) and the target content
+        # (static across repeated calls on the SAME target — only `prompt`
+        # varies). Keeping `prompt` in its own, uncached block after the
+        # target means changing the prompt never invalidates the cached
+        # target prefix.
+        message = await self._client.messages.create(
+            model=settings.model,
+            max_tokens=settings.max_output_tokens,
+            system=[
+                {
+                    "type": "text",
+                    "text": _build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Target ({target.language or 'plaintext'}):\n{target.content}",
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {
+                            "type": "text",
+                            "text": f"Instruction: {prompt}",
+                        },
+                    ],
+                }
+            ],
+            tools=[
+                {
+                    "name": TOOL_NAME,
+                    "description": (
+                        "Propose one or more SEARCH/REPLACE blocks to apply to the target text."
+                    ),
+                    "input_schema": _TOOL_INPUT_SCHEMA,
+                    # Guarantees the model's tool call conforms to the schema
+                    # exactly, reducing how often we have to reject a
+                    # malformed block downstream.
+                    "strict": True,
+                }
+            ],
+            # Force the model to always call propose_patch — never prose.
             tool_choice={"type": "tool", "name": TOOL_NAME},
-        ) as stream:
-            async for event in stream:
-                if event.type == "content_block_start":
-                    if event.content_block.type == "tool_use" and event.content_block.name == TOOL_NAME:
-                        tool_block_indexes.add(event.index)
-                        buffers[event.index] = ""
-                        emitted_counts[event.index] = 0
+        )
 
-                elif event.type == "content_block_delta":
-                    if event.index not in tool_block_indexes:
-                        continue
-                    if event.delta.type == "input_json_delta":
-                        buffers[event.index] += event.delta.partial_json
-                        for op in self._try_emit_complete(
-                            buffers[event.index], emitted_counts[event.index], final=False
-                        ):
-                            emitted_counts[event.index] += 1
-                            yield op
+        usage = message.usage
+        logger.info(
+            "usage: input=%s cache_creation=%s cache_read=%s output=%s",
+            usage.input_tokens,
+            getattr(usage, "cache_creation_input_tokens", None),
+            getattr(usage, "cache_read_input_tokens", None),
+            usage.output_tokens,
+        )
 
-                elif event.type == "content_block_stop":
-                    if event.index not in tool_block_indexes:
-                        continue
-                    # Stream for this block is done — every remaining edit
-                    # in the buffer is now provably complete (no more bytes
-                    # are coming), so flush whatever wasn't already emitted.
-                    for op in self._try_emit_complete(
-                        buffers[event.index], emitted_counts[event.index], final=True
-                    ):
-                        emitted_counts[event.index] += 1
-                        yield op
+        tool_use = next((b for b in message.content if b.type == "tool_use"), None)
+        if tool_use is None:
+            raise ValueError("model response contained no tool_use block")
 
-                elif event.type == "message_delta":
-                    usage = getattr(event, "usage", None)
-                    if usage is not None:
-                        logger.info(
-                            "usage delta: input=%s cache_creation=%s cache_read=%s output=%s",
-                            getattr(usage, "input_tokens", None),
-                            getattr(usage, "cache_creation_input_tokens", None),
-                            getattr(usage, "cache_read_input_tokens", None),
-                            getattr(usage, "output_tokens", None),
-                        )
+        raw_blocks = tool_use.input.get("blocks")
+        if not isinstance(raw_blocks, list):
+            raise ValueError("model tool input missing a 'blocks' array")
 
-            final_message = await stream.get_final_message()
-            usage = final_message.usage
-            logger.info(
-                "final usage: input=%s cache_creation=%s cache_read=%s output=%s",
-                usage.input_tokens,
-                getattr(usage, "cache_creation_input_tokens", None),
-                getattr(usage, "cache_read_input_tokens", None),
-                usage.output_tokens,
-            )
-
-    @staticmethod
-    def _try_emit_complete(buffer: str, already_emitted: int, *, final: bool) -> list[EditOp]:
-        """
-        Parse the (possibly truncated) JSON `buffer` and return any newly
-        complete EditOps beyond `already_emitted`.
-
-        Why this is safe: pydantic_core.from_json(allow_partial=True) only
-        includes a key once its value's literal token is fully closed (a
-        terminated string, a terminated number, etc.) — see the verification
-        run that informed this implementation. The one remaining hazard is a
-        JSON *number* that looks complete but is still mid-write (e.g. "1"
-        about to become "10"); a number is only provably final once a
-        delimiter after it (a comma or closing bracket) has also arrived. So
-        we never trust the LAST array element until the array (or the whole
-        block, on `final=True`) has actually closed — only elements that
-        already have a successor, or the fully-closed final buffer, are
-        treated as final.
-        """
-        try:
-            parsed: Any = pydantic_core.from_json(buffer.encode(), allow_partial=True)
-        except ValueError:
-            return []
-        if not isinstance(parsed, dict):
-            return []
-        edits = parsed.get("edits")
-        if not isinstance(edits, list):
-            return []
-
-        # On a fully-closed buffer (block_stop), every element is final.
-        # Otherwise, only elements strictly before the last one are final.
-        safe_count = len(edits) if final else max(0, len(edits) - 1)
-
-        new_ops: list[EditOp] = []
-        for raw in edits[already_emitted:safe_count]:
+        # Reject the WHOLE patch if any single block is malformed — same
+        # atomic-all-or-nothing principle as the applier: we never want to
+        # silently drop one bad block and proceed with the rest, since the
+        # caller has no way to know a block went missing.
+        blocks: list[SearchReplaceBlock] = []
+        for i, raw in enumerate(raw_blocks):
             try:
-                new_ops.append(EditOp.model_validate(raw))
-            except Exception:
-                # Shouldn't happen for an element pydantic_core deemed
-                # complete, but never emit something that doesn't validate.
-                continue
-        return new_ops
+                blocks.append(SearchReplaceBlock.model_validate(raw))
+            except Exception as exc:
+                raise ValueError(f"malformed block at index {i}: {exc}") from exc
+
+        return blocks
