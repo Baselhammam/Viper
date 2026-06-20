@@ -8,8 +8,9 @@
 // element's default behavior (so buttons/links don't navigate on an edit click),
 // and posts the eid + clean outerHTML to the parent window.
 //
-// The closing tag is written as <\/script> so the literal string can be embedded
-// inside an HTML document without prematurely terminating a script context.
+// The closing tag is split via interpolation (`<${'/script>'}`) so the literal
+// substring "</script>" never appears in source, which would otherwise prematurely
+// terminate the script context once this module is embedded in an HTML document.
 export const CLICK_SCRIPT = `
 <script>
 (function () {
@@ -47,5 +48,5 @@ export const CLICK_SCRIPT = `
     }, '*');
   }, true);
 })();
-<\/script>
+<${'/script>'}
 `
