@@ -7,12 +7,10 @@ import { scopedEdit } from './edit/scopedEdit'
 import type { SelectedElement } from './types'
 
 export default function App() {
-  // The canonical document lives outside React state (it's mutable and we never
-  // re-create it); `srcdoc` is the serialized snapshot that drives re-renders.
-  const storeRef = useRef<DocumentStore | null>(null)
-  if (storeRef.current === null) storeRef.current = new DocumentStore(SEED_HTML)
-  const store = storeRef.current
-
+  // The canonical document is a mutable instance, not React state — `srcdoc` is the
+  // serialized snapshot that drives re-renders. useState's lazy initializer (not a
+  // ref) creates it once, on the initial render.
+  const [store] = useState(() => new DocumentStore(SEED_HTML))
   const [srcdoc, setSrcdoc] = useState(() => store.serialize())
   const [selected, setSelected] = useState<SelectedElement | null>(null)
   const [before, setBefore] = useState<string | null>(null)

@@ -1,0 +1,26 @@
+# Quality gate for the editor's source. Unlike the daily-report/audit crons, this
+# runs on every push to main and every PR, so broken types, lint errors, or failing
+# tests block the change instead of being noticed a day later.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # Cache the npm download dir so installs are fast on repeat runs.
+          cache: "npm"
+      # `npm ci` installs exactly what package-lock.json pins — reproducible builds.
+      - run: npm ci
+      # tsc: type soundness. lint: suspect runtime patterns. test: behavior.
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
